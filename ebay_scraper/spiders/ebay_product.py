@@ -55,6 +55,11 @@ class EbayProductSpider(scrapy.Spider):
         for url in self.product_urls:
             self.logger.info(f"Product URL: {url}")
     
+    async def start(self):
+        # Scrapy 2.13+ entry point; start_requests() is kept for older versions.
+        for request in self.start_requests():
+            yield request
+
     def start_requests(self):
         """Generate initial product requests"""
         for product_url in self.product_urls:

@@ -161,14 +161,12 @@ To use the ScrapeOps Proxy you need to first install the proxy middleware:
 pip install scrapeops-scrapy-proxy-sdk
 ```
 
-Then activate the ScrapeOps Proxy by adding your API key to the `SCRAPEOPS_API_KEY` in the `settings.py` file:
-```python
-SCRAPEOPS_API_KEY = 'YOUR_API_KEY'
-SCRAPEOPS_PROXY_ENABLED = True
-DOWNLOADER_MIDDLEWARES = {
-    'scrapeops_scrapy_proxy_sdk.scrapeops_scrapy_proxy_sdk.ScrapeOpsScrapyProxySdk': 725,
-}
+The proxy is optional. Without a key the spiders request eBay directly, which works for light use, but eBay starts answering 403 after a burst of requests from one IP. To route requests through ScrapeOps, set your API key in the environment:
+```bash
+export SCRAPEOPS_API_KEY='YOUR_API_KEY'
+scrapy crawl ebay_search -a query="macbook pro m3"
 ```
+`settings.py` reads the key from `SCRAPEOPS_API_KEY` and enables the proxy only when it is set.
 
 ## 📊 eBay Website Analyzer
 

@@ -48,6 +48,11 @@ class EbaySearchSpider(scrapy.Spider):
         self.logger.info(f"Starting eBay search for: '{self.search_query}' on {self.site}")
         self.logger.info(f"Max results to scrape: {self.max_results}")
     
+    async def start(self):
+        # Scrapy 2.13+ entry point; start_requests() is kept for older versions.
+        for request in self.start_requests():
+            yield request
+
     def start_requests(self):
         """Generate initial search requests"""
         search_params = {
@@ -124,8 +129,9 @@ class EbaySearchSpider(scrapy.Spider):
         """Parse eBay search results page"""
         self.logger.info(f"Parsing search results from: {response.url}")
         
-        # Extract search result items
-        item_containers = response.css('.s-item')
+        # Each organic result is an <li class="s-card"> directly under the results list.
+        # Carousels, filters and pagination are <li class="srp-river-answer"> and are skipped.
+        item_containers = response.css('ul.srp-results > li.s-card[data-listingid]')
         
         if not item_containers:
             self.logger.warning("No search result items found")
@@ -134,10 +140,6 @@ class EbaySearchSpider(scrapy.Spider):
         for container in item_containers:
             if self.results_count >= self.max_results:
                 return
-            
-            # Skip sponsored/ad items if desired
-            if container.css('.s-item__subtitle:contains("Sponsored")'):
-                continue
             
             try:
                 item_data = self.extract_search_item_data(container, response.meta)
@@ -164,144 +166,107 @@ class EbaySearchSpider(scrapy.Spider):
                     headers=self._get_headers()
                 )
     
+    CONDITION_PATTERN = re.compile(
+        r'^(Brand New|New|New \(Other\)|New with.*|Open Box|Pre-Owned|Used|'
+        r'.*Refurbished|Parts Only|For parts.*)$',
+        re.IGNORECASE,
+    )
+    SELLER_PATTERN = re.compile(r'^(\S+)\s+([\d.]+)% positive \(([\d.,]+K?)\)')
+    
+    def _texts(self, selector):
+        """Joined, whitespace-normalised text of a selector"""
+        return re.sub(r'\s+', ' ', ' '.join(selector.css('*::text').getall())).strip()
+    
     def extract_search_item_data(self, container, meta):
-        """Extract data from a single search result item"""
+        """Extract data from a single search result card (eBay's s-card layout)"""
         try:
             item = EbaySearchItem()
             
+            item['product_id'] = container.attrib.get('data-listingid', '')
+            item['listing_id'] = item['product_id']
+            
             # Product title and URL
-            title_link = container.css('h3.s-item__title a')
-            if not title_link:
-                title_link = container.css('.s-item__link')
+            title = container.css('.s-card__title .su-styled-text::text').get('')
+            url = container.css('.su-card-container__header a.s-card__link::attr(href)').get('') \
+                or container.css('a.s-card__link::attr(href)').get('')
             
-            if title_link:
-                item['product_title'] = title_link.css('::text').get('')
-                item['product_url'] = title_link.css('::attr(href)').get('')
-                
-                # Extract item ID from URL
-                if item['product_url']:
-                    item['product_id'] = self._extract_item_id(item['product_url'])
-                    item['listing_id'] = item['product_id']
-            else:
-                return None
-            
-            # Skip if no title or URL
-            if not item['product_title'] or not item['product_url']:
+            if not title or not url:
                 return None
 
             # Skip placeholder or invalid items (item_id must be all digits and at least 9 digits)
-            if not item['product_id'] or not item['product_id'].isdigit() or len(item['product_id']) < 9:
+            if not item['product_id'].isdigit() or len(item['product_id']) < 9:
                 return None
             
-            # Clean title
-            item['product_title'] = self._clean_title(item['product_title'])
+            item['product_title'] = self._clean_title(title)
+            # Drop eBay's tracking parameters
+            item['product_url'] = url.split('?')[0]
             
-            # Current price
-            price_element = container.css('.s-item__price .notranslate')
-            if price_element:
-                price_text = price_element.css('::text').get('')
-                item['current_price'] = price_text.strip()
-            else:
-                # Alternative price selectors
-                price_alt = container.css('.s-item__price::text').get('')
-                item['current_price'] = price_alt.strip() if price_alt else ''
+            # Price: may be a range ("$500.00 to $700.00"); a discounted listing
+            # shows the original price in a struck-through span next to it.
+            prices = [p.strip() for p in container.css('.s-card__price::text').getall() if p.strip()]
+            item['current_price'] = ' to '.join(prices)
+            item['original_price'] = container.css('.strikethrough::text').get('').strip()
             
-            # Shipping cost
-            shipping_element = container.css('.s-item__shipping')
-            if shipping_element:
-                shipping_text = shipping_element.css('::text').get('')
-                item['shipping_cost'] = shipping_text.strip() if shipping_text else ''
-            else:
-                item['shipping_cost'] = ''
+            # Condition and subtitles
+            item['condition'] = ''
+            for subtitle in container.css('.s-card__subtitle'):
+                text = self._texts(subtitle)
+                if self.CONDITION_PATTERN.match(text):
+                    item['condition'] = text
+                    break
             
-            # Seller information
-            seller_element = container.css('.s-item__seller-info-text')
-            if seller_element:
-                seller_text = seller_element.css('::text').get('')
-                if seller_text:
-                    item['seller_name'] = seller_text.strip()
-            else:
-                item['seller_name'] = ''
+            # Image
+            item['main_image'] = container.css('img.s-card__image::attr(src)').get('') \
+                or container.css('img.s-card__image::attr(data-defer-load)').get('')
+            item['thumbnail_image'] = item['main_image']
             
-            # Location
-            location_element = container.css('.s-item__location')
-            if location_element:
-                location_text = location_element.css('::text').get('')
-                item['seller_location'] = location_text.strip() if location_text else ''
-            else:
-                item['seller_location'] = ''
+            # The attribute rows are unlabelled, so classify them by their text.
+            item['shipping_cost'] = ''
+            item['seller_location'] = ''
+            item['seller_name'] = ''
+            item['seller_feedback_score'] = ''
+            item['seller_feedback_percentage'] = ''
+            item['bid_count'] = ''
+            item['time_left'] = ''
+            item['watchers'] = ''
+            item['items_sold'] = ''
+            item['buy_it_now_price'] = ''
+            item['price_type'] = 'buy_it_now'
+            item['listing_format'] = ''
+            item['returns_accepted'] = False
             
-            # Condition
-            condition_element = container.css('.SECONDARY_INFO')
-            if condition_element:
-                condition_text = condition_element.css('::text').get('')
-                item['condition'] = condition_text.strip() if condition_text else ''
-            else:
-                item['condition'] = ''
-            
-            # Main image
-            image_element = container.css('.s-item__image img')
-            if image_element:
-                item['main_image'] = image_element.css('::attr(src)').get('')
-                item['thumbnail_image'] = item['main_image']
-            else:
-                item['main_image'] = ''
-                item['thumbnail_image'] = ''
-            
-            # Auction/bid information
-            bid_element = container.css('.s-item__bidding')
-            if bid_element:
-                bid_text = bid_element.css('::text').get('')
-                if bid_text and 'bid' in bid_text.lower():
-                    item['bid_count'] = self._extract_bid_count(bid_text)
+            for row in container.css('.s-card__attribute-row'):
+                text = self._texts(row)
+                lower = text.lower()
+                seller_match = self.SELLER_PATTERN.match(text)
+                if seller_match:
+                    item['seller_name'] = seller_match.group(1)
+                    item['seller_feedback_percentage'] = seller_match.group(2)
+                    item['seller_feedback_score'] = seller_match.group(3)
+                elif lower.startswith('located in'):
+                    item['seller_location'] = text[len('located in'):].strip()
+                elif 'delivery' in lower or 'shipping' in lower:
+                    item['shipping_cost'] = text
+                elif re.search(r'\d+\s*bids?\b', lower):
+                    item['bid_count'] = self._extract_bid_count(text)
                     item['price_type'] = 'auction'
-                else:
-                    item['bid_count'] = ''
-                    item['price_type'] = 'buy_it_now'
-            else:
-                item['bid_count'] = ''
-                item['price_type'] = 'buy_it_now'
-            
-            # Time left (for auctions)
-            time_element = container.css('.s-item__time-left')
-            if time_element:
-                time_text = time_element.css('::text').get('')
-                item['time_left'] = time_text.strip() if time_text else ''
-            else:
-                item['time_left'] = ''
-            
-            # Buy It Now price (for auctions)
-            buy_now_element = container.css('.s-item__purchase-options-with-icon')
-            if buy_now_element:
-                buy_now_text = buy_now_element.css('::text').get('')
-                if 'Buy It Now' in buy_now_text:
-                    item['buy_it_now_price'] = self._extract_price_from_text(buy_now_text)
-                else:
-                    item['buy_it_now_price'] = ''
-            else:
-                item['buy_it_now_price'] = ''
-            
-            # Watchers count
-            watchers_element = container.css('.s-item__watchheart-count')
-            if watchers_element:
-                watchers_text = watchers_element.css('::text').get('')
-                item['watchers'] = self._extract_number(watchers_text) if watchers_text else ''
-            else:
-                item['watchers'] = ''
-            
-            # Items sold information
-            sold_element = container.css('.s-item__quantitySold')
-            if sold_element:
-                sold_text = sold_element.css('::text').get('')
-                item['items_sold'] = self._extract_number(sold_text) if sold_text else ''
-            else:
-                item['items_sold'] = ''
+                elif lower.endswith(' left') or re.search(r'\d+[dhm] \d+[hms] left', lower):
+                    item['time_left'] = text
+                elif 'watcher' in lower:
+                    item['watchers'] = self._extract_number(text.replace(',', ''))
+                elif re.search(r'\bsold\b', lower):
+                    item['items_sold'] = self._extract_number(text.replace(',', ''))
+                elif lower == 'buy it now':
+                    item['listing_format'] = 'Buy It Now'
+                elif lower == 'or best offer':
+                    item['listing_format'] = 'Best Offer'
+                elif 'returns' in lower:
+                    item['returns_accepted'] = True
             
             # Special features
-            item['fast_n_free'] = bool(container.css('.s-item__fast-n-free'))
-            item['top_rated_seller'] = bool(container.css('.s-item__etrs'))
-            item['returns_accepted'] = bool(container.css('.s-item__returns'))
-            item['authenticity_guarantee'] = bool(container.css('.s-item__authenticity'))
+            item['fast_n_free'] = 'free' in item['shipping_cost'].lower()
+            item['top_rated_seller'] = bool(container.css('.su-icon--legacy-top-rated-seller, .su-icon--top-rated-seller'))
+            item['authenticity_guarantee'] = bool(container.css('.su-icon--legacy-authenticity-guarantee, .su-icon--authenticity-guarantee'))
             
             # Search context
             item['search_query'] = meta['search_query']
@@ -310,31 +275,27 @@ class EbaySearchSpider(scrapy.Spider):
             item['search_sort'] = self.sort
             
             # Additional fields with defaults
-            item['original_price'] = ''
             item['discount_percentage'] = ''
             item['brand'] = ''
             item['model'] = ''
             item['category'] = ''
             item['subcategory'] = ''
             item['seller_id'] = ''
-            item['seller_feedback_score'] = ''
-            item['seller_feedback_percentage'] = ''
             item['seller_verified'] = False
             item['quantity_available'] = ''
             item['listing_type'] = item['price_type']
-            item['listing_format'] = ''
-            item['ebay_plus'] = bool(container.css('.s-item__etrs'))
-            item['sponsored'] = bool(container.css('.s-item__subtitle:contains("Sponsored")'))
+            item['ebay_plus'] = item['top_rated_seller']
+            item['sponsored'] = False
             item['reserve_met'] = ''
             item['end_time'] = ''
-            item['ships_from'] = ''
+            item['ships_from'] = item['seller_location']
             item['ships_to'] = ''
             item['handling_time'] = ''
             item['shipping_type'] = ''
             item['return_period'] = ''
             item['image_count'] = 1 if item['main_image'] else 0
             
-            self.logger.info(f"Extracted item: {item['product_title'][:50]}... - ${item['current_price']}")
+            self.logger.info(f"Extracted item: {item['product_title'][:50]}... - {item['current_price']}")
             return item
             
         except Exception as e:

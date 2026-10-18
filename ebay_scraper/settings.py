@@ -7,6 +7,8 @@
 #     https://docs.scrapy.org/en/latest/topics/downloader-middleware.html
 #     https://docs.scrapy.org/en/latest/topics/spider-middleware.html
 
+import os
+
 BOT_NAME = 'ebay_scraper'
 
 SPIDER_MODULES = ['ebay_scraper.spiders']
@@ -16,8 +18,10 @@ NEWSPIDER_MODULE = 'ebay_scraper.spiders'
 ROBOTSTXT_OBEY = False
 
 # ScrapeOps Settings
-SCRAPEOPS_API_KEY = 'Your-API-Key'  # Get your ScrapeOps API key from https://scrapeops.io/app/register/main/
-SCRAPEOPS_PROXY_ENABLED = True
+# The proxy is optional: eBay search pages load fine without it. Set SCRAPEOPS_API_KEY
+# in the environment to route requests through ScrapeOps (https://scrapeops.io/app/register/main/).
+SCRAPEOPS_API_KEY = os.environ.get('SCRAPEOPS_API_KEY', '')
+SCRAPEOPS_PROXY_ENABLED = bool(SCRAPEOPS_API_KEY)
 SCRAPEOPS_RENDER_JS = True
 SCRAPEOPS_WAIT = 3000
 SCRAPEOPS_BYPASS = 'generic_level_2'
@@ -26,9 +30,7 @@ SCRAPEOPS_BYPASS = 'generic_level_2'
 # See https://docs.scrapy.org/en/latest/topics/settings.html#download-delay
 # See also autothrottle settings and docs
 DOWNLOAD_DELAY = 2
-# The download delay setting will honor only one of:
 CONCURRENT_REQUESTS_PER_DOMAIN = 8
-CONCURRENT_REQUESTS_PER_IP = 8
 
 # Disable cookies (enabled by default)
 COOKIES_ENABLED = True
@@ -97,7 +99,8 @@ AUTOTHROTTLE_DEBUG = False
 HTTPCACHE_ENABLED = True
 HTTPCACHE_EXPIRATION_SECS = 3600
 HTTPCACHE_DIR = 'httpcache'
-HTTPCACHE_IGNORE_HTTP_CODES = [301, 302, 303, 306, 307, 308, 404, 410]
+# Don't cache blocks or server errors, or retries would replay them for an hour
+HTTPCACHE_IGNORE_HTTP_CODES = [301, 302, 303, 306, 307, 308, 403, 404, 410, 429, 500, 502, 503, 504]
 HTTPCACHE_STORAGE = 'scrapy.extensions.httpcache.FilesystemCacheStorage'
 
 # Custom eBay Settings

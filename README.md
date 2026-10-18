@@ -44,6 +44,9 @@ scrapy crawl ebay_search -a query="laptop computer" -a min_price=500 -a max_pric
 
 # Search on specific eBay site
 scrapy crawl ebay_search -a query="vintage watch" -a site="UK" -a max_results=50
+
+# Only listings located in the site's country (here: Germany on ebay.de)
+scrapy crawl ebay_search -a query="macbook pro m3" -a site="DE" -a domestic=1
 ```
 
 **Scrape Detailed Product Information:**

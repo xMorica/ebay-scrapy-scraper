@@ -18,7 +18,7 @@ class EbaySearchSpider(scrapy.Spider):
     }
     
     def __init__(self, query=None, max_results=50, site='US', condition=None, 
-                 min_price=None, max_price=None, sort='BestMatch', *args, **kwargs):
+                 min_price=None, max_price=None, sort='BestMatch', domestic=False, *args, **kwargs):
         super(EbaySearchSpider, self).__init__(*args, **kwargs)
         
         self.search_query = query or 'laptop computer'
@@ -28,6 +28,8 @@ class EbaySearchSpider(scrapy.Spider):
         self.min_price = min_price
         self.max_price = max_price
         self.sort = sort
+        # Only listings located in the site's own country (e.g. Germany on ebay.de)
+        self.domestic = str(domestic).lower() in ('1', 'true', 'yes')
         self.results_count = 0
         self.current_page = 1
         
@@ -69,6 +71,9 @@ class EbaySearchSpider(scrapy.Spider):
             search_params['_udlo'] = self.min_price
         if self.max_price:
             search_params['_udhi'] = self.max_price
+        
+        if self.domestic:
+            search_params['LH_PrefLoc'] = '1'
         
         # Add other useful parameters
         search_params.update({
@@ -166,12 +171,15 @@ class EbaySearchSpider(scrapy.Spider):
                     headers=self._get_headers()
                 )
     
+    # English (ebay.com) and German (ebay.de) labels. On ebay.de the condition
+    # subtitle carries the seller type too: "Gebraucht | Privat".
     CONDITION_PATTERN = re.compile(
         r'^(Brand New|New|New \(Other\)|New with.*|Open Box|Pre-Owned|Used|'
-        r'.*Refurbished|Parts Only|For parts.*)$',
+        r'.*Refurbished|Parts Only|For parts.*|'
+        r'Neu|Neu \(Sonstige\)|Neu mit.*|Gebraucht|Wie neu|Als Ersatzteil.*|Defekt.*)$',
         re.IGNORECASE,
     )
-    SELLER_PATTERN = re.compile(r'^(\S+)\s+([\d.]+)% positive \(([\d.,]+K?)\)')
+    SELLER_PATTERN = re.compile(r'^(\S+)\s+([\d.,]+)% positiv[e]? \(([\d.,]+K?)\)')
     
     def _texts(self, selector):
         """Joined, whitespace-normalised text of a selector"""
@@ -210,7 +218,7 @@ class EbaySearchSpider(scrapy.Spider):
             # Condition and subtitles
             item['condition'] = ''
             for subtitle in container.css('.s-card__subtitle'):
-                text = self._texts(subtitle)
+                text = self._texts(subtitle).split(' | ')[0]
                 if self.CONDITION_PATTERN.match(text):
                     item['condition'] = text
                     break
@@ -245,26 +253,31 @@ class EbaySearchSpider(scrapy.Spider):
                     item['seller_feedback_score'] = seller_match.group(3)
                 elif lower.startswith('located in'):
                     item['seller_location'] = text[len('located in'):].strip()
-                elif 'delivery' in lower or 'shipping' in lower:
+                elif 'abholstation' in lower:
+                    continue  # "pickup station available", not a shipping cost
+                elif any(k in lower for k in ('delivery', 'shipping', 'lieferung', 'versand')) \
+                        and 'rückversand' not in lower:
                     item['shipping_cost'] = text
-                elif re.search(r'\d+\s*bids?\b', lower):
-                    item['bid_count'] = self._extract_bid_count(text)
+                elif re.search(r'\d+\s*(bids?|gebote?)\b', lower):
+                    item['bid_count'] = self._extract_number(text)
                     item['price_type'] = 'auction'
-                elif lower.endswith(' left') or re.search(r'\d+[dhm] \d+[hms] left', lower):
+                elif lower.endswith(' left') or lower.startswith('noch ') or lower.endswith('übrig'):
                     item['time_left'] = text
-                elif 'watcher' in lower:
-                    item['watchers'] = self._extract_number(text.replace(',', ''))
-                elif re.search(r'\bsold\b', lower):
-                    item['items_sold'] = self._extract_number(text.replace(',', ''))
-                elif lower == 'buy it now':
+                elif 'watcher' in lower or 'beobachter' in lower:
+                    item['watchers'] = self._extract_number(re.sub(r'[,.]', '', text))
+                elif re.search(r'\b(sold|verkauft)\b', lower):
+                    item['items_sold'] = self._extract_number(re.sub(r'[,.]', '', text))
+                elif lower in ('buy it now', 'sofort-kaufen'):
                     item['listing_format'] = 'Buy It Now'
-                elif lower == 'or best offer':
+                elif lower in ('or best offer', 'oder preisvorschlag'):
                     item['listing_format'] = 'Best Offer'
-                elif 'returns' in lower:
+                elif 'returns' in lower or 'rückversand' in lower or 'rücknahme' in lower:
                     item['returns_accepted'] = True
             
             # Special features
-            item['fast_n_free'] = 'free' in item['shipping_cost'].lower()
+            item['fast_n_free'] = any(k in item['shipping_cost'].lower() for k in ('free', 'gratis', 'kostenlos'))
+            if self.domestic and not item['seller_location']:
+                item['seller_location'] = self.site
             item['top_rated_seller'] = bool(container.css('.su-icon--legacy-top-rated-seller, .su-icon--top-rated-seller'))
             item['authenticity_guarantee'] = bool(container.css('.su-icon--legacy-authenticity-guarantee, .su-icon--authenticity-guarantee'))
             

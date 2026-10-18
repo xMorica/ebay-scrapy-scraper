@@ -133,7 +133,8 @@ CURRENCY_SYMBOLS = {
 }
 
 # Request and Response Settings
-DOWNLOAD_TIMEOUT = 30
+# The ScrapeOps proxy can take well over 30s to answer
+DOWNLOAD_TIMEOUT = 120 if SCRAPEOPS_PROXY_ENABLED else 30
 RETRY_TIMES = 3
 RETRY_HTTP_CODES = [500, 502, 503, 504, 408, 429, 403]
 
